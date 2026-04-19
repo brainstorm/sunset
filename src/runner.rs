@@ -310,6 +310,13 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             self.traf_in.done_payload();
         }
 
+        // Handling incoming packets or running conn.progress() may need to send
+        // response packets. If the output buffer is full, bail early and wait
+        // for the caller to drain output before we process more.
+        if self.traf_out.send_allowed(&self.keys) == 0 {
+            return Ok(Event::None);
+        }
+
         let mut disp = Dispatched::default();
 
         // Handle incoming packets
@@ -910,5 +917,45 @@ impl core::fmt::Debug for ChanHandle {
 
 #[cfg(test)]
 mod tests {
-    // TODO: test send_allowed() limits
+    use super::*;
+    use event::Event;
+
+    #[test]
+    fn progress_returns_none_when_output_full() {
+        let mut inbuf = [0u8; 256];
+        let mut outbuf = [0u8; 5]; // too small for any packet overhead
+        let mut runner = Runner::new_server(&mut inbuf, &mut outbuf);
+        assert_eq!(runner.traf_out.send_allowed(&runner.keys), 0);
+        // guard must return Event::None, not a NoRoom error
+        assert!(matches!(runner.progress(), Ok(Event::None)));
+    }
+
+    #[test]
+    fn progress_advances_when_output_has_space() {
+        let mut inbuf = [0u8; 3000];
+        let mut outbuf = [0u8; 3000];
+        let mut runner = Runner::new_server(&mut inbuf, &mut outbuf);
+        assert!(runner.traf_out.send_allowed(&runner.keys) > 0);
+        assert!(matches!(runner.progress(), Ok(Event::Progressed)));
+    }
+
+    #[test]
+    fn progress_unblocks_after_output_drained() {
+        let mut inbuf = [0u8; 3000];
+        let mut outbuf = [0u8; 3000];
+        let mut runner = Runner::new_server(&mut inbuf, &mut outbuf);
+
+        // First call makes progress and produces pending output
+        assert!(matches!(runner.progress(), Ok(Event::Progressed)));
+        assert!(runner.is_output_pending());
+
+        let allowed_before = runner.traf_out.send_allowed(&runner.keys);
+
+        // Drain all pending output
+        let len = runner.output_buf().len();
+        runner.consume_output(len);
+
+        assert!(!runner.is_output_pending());
+        assert!(runner.traf_out.send_allowed(&runner.keys) > allowed_before);
+    }
 }
