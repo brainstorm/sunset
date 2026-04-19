@@ -202,16 +202,34 @@ impl Channels {
 
     /// Informs the channel layer that an incoming packet has been read out,
     /// so a window adjustment can be sent.
+    ///
+    /// `buffer_has_space` should be `false` when the output buffer is under
+    /// pressure. The adjustment is deferred (accumulated in `pending_adjust`)
+    /// and sent later via [`flush_pending_window_adjusts`].
     pub(crate) fn finished_read(
         &mut self,
         num: ChanNum,
         len: usize,
         s: &mut TrafSend,
+        buffer_has_space: bool,
     ) -> Result<()> {
         let ch = self.get_mut(num)?;
         ch.finished_input(len);
-        if let Some(w) = ch.check_window_adjust()? {
-            s.send(w)?;
+        if buffer_has_space {
+            if let Some(w) = ch.check_window_adjust()? {
+                s.send(w)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Send any `ChannelWindowAdjust` packets that were deferred because the
+    /// output buffer was full. Called after the buffer drains.
+    pub(crate) fn flush_pending_window_adjusts(&mut self, s: &mut TrafSend) -> Result<()> {
+        for ch in self.ch.iter_mut().flatten() {
+            if let Some(w) = ch.check_window_adjust()? {
+                s.send(w)?;
+            }
         }
         Ok(())
     }

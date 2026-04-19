@@ -446,6 +446,11 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             // All output has been consumed, space will now
             // be available. Wake any wakers that may have been waiting
             // for space.
+            // Also flush any ChannelWindowAdjust packets that were suppressed
+            // while the buffer was under pressure.
+            let mut s = self.traf_out.sender(&mut self.keys);
+            // best-effort: errors will surface on the next progress() call
+            let _ = self.conn.channels.flush_pending_window_adjusts(&mut s);
             self.channel_wake_write();
             self.wake();
         }
@@ -569,8 +574,9 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         chan: &ChanHandle,
         len: usize,
     ) -> Result<()> {
+        let buffer_has_space = self.traf_out.send_allowed(&self.keys) > 0;
         let mut s = self.traf_out.sender(&mut self.keys);
-        self.conn.channels.finished_read(chan.0, len, &mut s)?;
+        self.conn.channels.finished_read(chan.0, len, &mut s, buffer_has_space)?;
         self.wake();
         Ok(())
     }
