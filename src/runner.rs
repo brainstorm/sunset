@@ -14,6 +14,18 @@ use event::{CliEvent, CliEventId, Event, ServEvent, ServEventId};
 use traffic::{TrafIn, TrafOut};
 
 use conn::{CliServ, Conn, DispatchEvent, Dispatched};
+use channel::DataIn;
+
+/// Holds channel data extracted from `traf_in`, freeing it to receive the
+/// next wire packet (including `SSH_MSG_CHANNEL_WINDOW_ADJUST`) while the
+/// application is still consuming this data.
+struct ChanRecv {
+    chan: ChanNum,
+    dt: ChanData,
+    buf: [u8; config::DEFAULT_MAX_PACKET],
+    offset: usize,
+    len: usize,
+}
 
 pub(crate) type ServRunner<'a> = Runner<'a, server::Server>;
 pub(crate) type CliRunner<'a> = Runner<'a, client::Client>;
@@ -44,6 +56,9 @@ pub struct Runner<'a, CS: conn::CliServ> {
     input_waker: Option<Waker>,
 
     closed_input: bool,
+
+    /// Channel data buffered out of `traf_in` so the wire can keep flowing.
+    chan_recv: Option<ChanRecv>,
 
     resume_event: DispatchEvent,
     // Some incoming packets will produce multiple Events from a single packet.
@@ -279,6 +294,7 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             output_waker: None,
             input_waker: None,
             closed_input: false,
+            chan_recv: None,
             resume_event: DispatchEvent::None,
             extra_resume_event: DispatchEvent::None,
         }
@@ -326,8 +342,7 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
 
             match disp.event {
                 DispatchEvent::Data(data_in) => {
-                    // incoming channel data, we haven't finished with payload
-                    let (num, dt) = self.traf_in.set_read_channel_data(data_in)?;
+                    let (num, dt) = self.buffer_channel_data(data_in)?;
                     self.channel_wake_read(num, dt);
                     disp.event = DispatchEvent::None
                 }
@@ -520,6 +535,32 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         Ok(len)
     }
 
+    /// Extracts channel data from `traf_in` into `chan_recv`, freeing `traf_in`
+    /// to receive the next wire packet immediately.
+    ///
+    /// Falls back to the old in-place approach only when `chan_recv` is already
+    /// occupied (two channels delivering data simultaneously).
+    fn buffer_channel_data(&mut self, data_in: DataIn) -> Result<(ChanNum, ChanData)> {
+        if self.chan_recv.is_none() {
+            let len = data_in.len.get();
+            let mut recv = ChanRecv {
+                chan: data_in.num,
+                dt: data_in.dt,
+                buf: [0u8; config::DEFAULT_MAX_PACKET],
+                offset: 0,
+                len,
+            };
+            self.traf_in.extract_channel_data(&data_in, &mut recv.buf);
+            self.chan_recv = Some(recv);
+            self.traf_in.done_payload(); // traf_in → Idle: can now receive window adjusts
+            Ok((data_in.num, data_in.dt))
+        } else {
+            // Fallback: leave data in traf_in (old behaviour).
+            // Occurs when two channels have simultaneous pending reads.
+            self.traf_in.set_read_channel_data(data_in)
+        }
+    }
+
     /// Receive data coming from the wire into this application.
     ///
     /// Returns `Ok(len)` received, `Err(Error::ChannelEof)` on EOF,
@@ -541,6 +582,22 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             return error::ChannelEOF.fail();
         }
 
+        // chan_recv holds data extracted from traf_in (the common fast path).
+        if let Some(ref mut cr) = self.chan_recv {
+            if cr.chan == chan.0 && cr.dt == dt {
+                let wlen = (cr.len - cr.offset).min(buf.len());
+                buf[..wlen].copy_from_slice(&cr.buf[cr.offset..cr.offset + wlen]);
+                cr.offset += wlen;
+                if cr.offset == cr.len {
+                    let done = cr.len;
+                    self.chan_recv = None;
+                    self.finished_read_channel(chan, done)?;
+                }
+                return Ok(wlen);
+            }
+        }
+
+        // Fallback: data still in traf_in (two-channel simultaneous case).
         let (len, complete) = self.traf_in.read_channel(chan.0, dt, buf);
         if let Some(x) = complete {
             self.finished_read_channel(chan, x)?;
@@ -554,6 +611,21 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         chan: &ChanHandle,
         buf: &mut [u8],
     ) -> Result<(usize, ChanData)> {
+        if let Some(ref mut cr) = self.chan_recv {
+            if cr.chan == chan.0 {
+                let dt = cr.dt;
+                let wlen = (cr.len - cr.offset).min(buf.len());
+                buf[..wlen].copy_from_slice(&cr.buf[cr.offset..cr.offset + wlen]);
+                cr.offset += wlen;
+                if cr.offset == cr.len {
+                    let done = cr.len;
+                    self.chan_recv = None;
+                    self.finished_read_channel(chan, done)?;
+                }
+                return Ok((wlen, dt));
+            }
+        }
+
         let (len, complete, dt) = self.traf_in.read_channel_either(chan.0, buf);
         if let Some(x) = complete {
             self.finished_read_channel(chan, x)?;
@@ -564,6 +636,15 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
     /// Discards any channel input data pending for `chan`, regardless of whether
     /// normal or extended.
     pub fn discard_read_channel(&mut self, chan: &ChanHandle) -> Result<()> {
+        if let Some(ref cr) = self.chan_recv {
+            if cr.chan == chan.0 {
+                let done = cr.len;
+                self.chan_recv = None;
+                self.finished_read_channel(chan, done)?;
+                return Ok(());
+            }
+        }
+
         let x = self.traf_in.discard_read_channel(chan.0);
         self.finished_read_channel(chan, x)?;
         Ok(())
@@ -591,6 +672,12 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
     ///
     /// Returns `None` if no data ready.
     pub fn read_channel_ready(&self) -> Option<(ChanNum, ChanData, usize)> {
+        if let Some(ref cr) = self.chan_recv {
+            let remaining = cr.len - cr.offset;
+            if remaining > 0 {
+                return Some((cr.chan, cr.dt, remaining));
+            }
+        }
         self.traf_in.read_channel_ready()
     }
 

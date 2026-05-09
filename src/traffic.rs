@@ -249,6 +249,15 @@ impl<'a> TrafIn<'a> {
         }
     }
 
+    /// Copies the channel data bytes out of an `InPayload` packet into `dest`.
+    /// `dest` must be at least `di.len` bytes. Does not advance state.
+    pub(crate) fn extract_channel_data(&self, di: &channel::DataIn, dest: &mut [u8]) {
+        debug_assert!(matches!(self.state, RxState::InPayload { .. }));
+        let idx = SSH_PAYLOAD_START + di.dt.packet_offset();
+        let len = di.len.get();
+        dest[..len].copy_from_slice(&self.buf[idx..idx + len]);
+    }
+
     /// Set channel data ready to be read.
     pub fn set_read_channel_data(
         &mut self,
