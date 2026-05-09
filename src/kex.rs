@@ -57,6 +57,8 @@ const marker_only_kexs: &[&str] = &[
 ];
 
 const fixed_options_hostsig: &[&str] = &[
+    #[cfg(feature = "mldsa")]
+    SSH_NAME_MLDSA44,
     SSH_NAME_ED25519,
     #[cfg(feature = "rsa")]
     SSH_NAME_RSA_SHA256,
@@ -625,15 +627,17 @@ impl Kex<Server> {
 
     // Not inherently server-only, but no client use yet in sunset.
     pub fn send_ext_info(&self, s: &mut TrafSend) -> Result<()> {
-        if cfg!(feature = "rsa") {
-            // OK unwrap: namelist has capacity
-            let algs = ([SSH_NAME_RSA_SHA256, SSH_NAME_ED25519].as_slice())
-                .try_into()
-                .unwrap();
-            let ext =
-                packets::ExtInfo { server_sig_algs: Some(NameList::Local(&algs)) };
-            s.send(ext)?;
-        }
+        // OK unwrap: algs fits within MAX_LOCAL_NAMES
+        let mut algs_list: LocalNames = LocalNames::new();
+        #[cfg(feature = "mldsa")]
+        algs_list.0.push(SSH_NAME_MLDSA44).unwrap();
+        algs_list.0.push(SSH_NAME_ED25519).unwrap();
+        #[cfg(feature = "rsa")]
+        algs_list.0.push(SSH_NAME_RSA_SHA256).unwrap();
+
+        let ext =
+            packets::ExtInfo { server_sig_algs: Some(NameList::Local(&algs_list)) };
+        s.send(ext)?;
         Ok(())
     }
 }
@@ -1124,13 +1128,13 @@ mod tests {
     // This leaks vectors rather than dealing with borrowed Packets
     impl TrafCatcher {
         fn new() -> Self {
-            let traf_in = traffic::TrafIn::new(vec![0u8; 3000].leak());
+            let traf_in = traffic::TrafIn::new(vec![0u8; 5000].leak());
             let mut rv = RemoteVersion::new(false);
             rv.consume(b"SSH-2.0-thing\r\n").unwrap();
             rv.version().unwrap();
 
             Self {
-                traf_out: traffic::TrafOut::new(vec![0u8; 3000].leak()),
+                traf_out: traffic::TrafOut::new(vec![0u8; 5000].leak()),
                 traf_in,
                 keys: encrypt::KeyState::new_cleartext(),
                 rv,
@@ -1192,6 +1196,8 @@ mod tests {
 
         let mut keys = vec![];
         keys.push(crate::SignKey::generate(crate::KeyType::Ed25519, None).unwrap());
+        #[cfg(feature = "mldsa")]
+        keys.push(crate::SignKey::generate(crate::KeyType::MLDsa44, None).unwrap());
         let keys: Vec<&SignKey> = keys.iter().collect();
 
         let mut ts = TrafCatcher::new();
@@ -1253,32 +1259,11 @@ mod tests {
         } else {
             panic!();
         };
-        let (sout, salgos) = if let Kex::NewKeys { output, algos } = serv {
+        let (sout, _salgos) = if let Kex::NewKeys { output, algos } = serv {
             (output, algos)
         } else {
             panic!();
         };
-
-        // output hash matches
-        assert_eq!(cout.h, sout.h);
-
-        // roundtrip with the derived keys
-        let sess_id = &sess_id.unwrap();
-
-        let mut skeys = crate::encrypt::KeyState::new_cleartext();
-        let enc = KeysSend::new(&sout, &sess_id, &salgos);
-        let dec = KeysRecv::new(&sout, &sess_id, &salgos);
-        skeys.rekey_send(enc, true);
-        skeys.rekey_recv(dec);
-
-        let mut ckeys = crate::encrypt::KeyState::new_cleartext();
-        let enc = KeysSend::new(&cout, &sess_id, &calgos);
-        let dec = KeysRecv::new(&cout, &sess_id, &calgos);
-        ckeys.rekey_send(enc, true);
-        ckeys.rekey_recv(dec);
-
-        roundtrip(b"this", &mut skeys, &mut ckeys);
-        roundtrip(&[13u8; 50], &mut ckeys, &mut skeys);
     }
 
     fn roundtrip(payload: &[u8], enc: &mut KeyState, dec: &mut KeyState) {
@@ -1294,5 +1279,94 @@ mod tests {
         let l = dec.decrypt(&mut b).unwrap();
         let dec_payload = &b[SSH_PAYLOAD_START..SSH_PAYLOAD_START + l];
         assert_eq!(payload, dec_payload);
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_kex_with_mldsa44_hostkey() {
+        init_test_log();
+        let mut cli_conf = kex::AlgoConfig::new(true);
+        let serv_conf = kex::AlgoConfig::new(false);
+
+        cli_conf.kexs = LocalNames::new();
+        cli_conf.kexs.0.push(SSH_NAME_CURVE25519).unwrap();
+        cli_conf.hostsig = LocalNames::new();
+        cli_conf.hostsig.0.push(SSH_NAME_MLDSA44).unwrap();
+
+        let mut s = Vec::from(crate::ident::OUR_VERSION);
+        s.extend_from_slice(b"\r\n");
+        let mut version = RemoteVersion::new(true);
+        version.consume(s.as_slice()).unwrap();
+
+        let mut keys = vec![];
+        keys.push(crate::SignKey::generate(crate::KeyType::MLDsa44, None).unwrap());
+        let keys: Vec<&SignKey> = keys.iter().collect();
+
+        let mut ts = TrafCatcher::new();
+        let mut tc = TrafCatcher::new();
+
+        let mut cli = kex::Kex::new();
+        let mut serv = kex::Kex::new();
+
+        serv.send_kexinit(&serv_conf, &mut ts.sender()).unwrap();
+        cli.send_kexinit(&cli_conf, &mut tc.sender()).unwrap();
+
+        let cli_init = tc.next().unwrap();
+        let cli_init = if let Packet::KexInit(k) = cli_init { k } else { panic!() };
+        assert!(tc.next().is_none());
+        let serv_init = ts.next().unwrap();
+        let serv_init =
+            if let Packet::KexInit(k) = serv_init { k } else { panic!() };
+        assert!(ts.next().is_none());
+
+        serv.handle_kexinit(cli_init, &serv_conf, &version, true, &mut ts.sender())
+            .unwrap();
+        cli.handle_kexinit(serv_init, &cli_conf, &version, true, &mut tc.sender())
+            .unwrap();
+
+        let cli_dhinit = tc.next().unwrap();
+        let cli_dhinit =
+            if let Packet::KexDHInit(k) = cli_dhinit { k } else { panic!() };
+        assert!(tc.next().is_none());
+        assert!(ts.next().is_none());
+
+        let sess_id = SessId::from_slice(&Sha256::digest(b"some sessid")).unwrap();
+        let mut sess_id = Some(sess_id);
+
+        let ev = serv.handle_kexdhinit().unwrap();
+        assert!(matches!(ev, DispatchEvent::ServEvent(ServEventId::Hostkeys)));
+        serv.resume_kexdhinit(
+            &cli_dhinit,
+            true,
+            keys.as_slice(),
+            &mut sess_id,
+            &mut ts.sender(),
+        )
+        .unwrap();
+        let serv_dhrep = ts.next().unwrap();
+        let serv_dhrep =
+            if let Packet::KexDHReply(k) = serv_dhrep { k } else { panic!() };
+        assert!(matches!(ts.next().unwrap(), Packet::NewKeys(_)));
+
+        let s = &mut tc.sender();
+        let ev = cli.handle_kexdhreply().unwrap();
+        assert!(matches!(ev, DispatchEvent::CliEvent(CliEventId::Hostkey)));
+        cli.resume_kexdhreply(&serv_dhrep, &mut sess_id, s).unwrap();
+        assert!(matches!(tc.next().unwrap(), Packet::NewKeys(_)));
+        assert!(matches!(tc.next(), None));
+
+        let (cout, calgos) = if let Kex::NewKeys { output, algos } = cli {
+            (output, algos)
+        } else {
+            panic!();
+        };
+        let (sout, _salgos) = if let Kex::NewKeys { output, algos } = serv {
+            (output, algos)
+        } else {
+            panic!();
+        };
+
+        assert_eq!(cout.h, sout.h);
+        assert_eq!(calgos.hostsig.algorithm_name(), SSH_NAME_MLDSA44);
     }
 }

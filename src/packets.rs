@@ -332,6 +332,10 @@ pub enum PubKey<'a> {
     #[sshwire(variant = SSH_NAME_RSA)]
     RSA(RSAPubKey),
 
+    #[cfg(feature = "mldsa")]
+    #[sshwire(variant = SSH_NAME_MLDSA44)]
+    MLDsa44(MLDsa44PubKey),
+
     #[sshwire(unknown)]
     Unknown(Unknown<'a>),
 }
@@ -343,6 +347,8 @@ impl PubKey<'_> {
             PubKey::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             PubKey::RSA(_) => Ok(SSH_NAME_RSA),
+            #[cfg(feature = "mldsa")]
+            PubKey::MLDsa44(_) => Ok(SSH_NAME_MLDSA44),
             PubKey::Unknown(u) => Err(u),
         }
     }
@@ -405,6 +411,18 @@ pub struct Ed25519PubKey {
     pub key: Blob<[u8; 32]>,
 }
 
+#[cfg(feature = "mldsa")]
+pub(crate) const MLDSA44_PUBKEY_SIZE: usize = 1312;
+
+#[cfg(feature = "mldsa")]
+pub(crate) const MLDSA44_SIG_SIZE: usize = 2420;
+
+#[cfg(feature = "mldsa")]
+#[derive(Debug, Clone, PartialEq, SSHEncode, SSHDecode)]
+pub struct MLDsa44PubKey {
+    pub key: Blob<[u8; MLDSA44_PUBKEY_SIZE]>,
+}
+
 #[cfg(feature = "rsa")]
 #[derive(Clone, PartialEq)]
 pub struct RSAPubKey {
@@ -458,6 +476,10 @@ pub enum Signature<'a> {
     #[sshwire(variant = SSH_NAME_RSA_SHA256)]
     RSA(RSASig<'a>),
 
+    #[cfg(feature = "mldsa")]
+    #[sshwire(variant = SSH_NAME_MLDSA44)]
+    MLDsa44(MLDsa44Sig<'a>),
+
     #[sshwire(unknown)]
     Unknown(Unknown<'a>),
 }
@@ -469,6 +491,8 @@ impl<'a> Signature<'a> {
             Signature::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             Signature::RSA(_) => Ok(SSH_NAME_RSA_SHA256),
+            #[cfg(feature = "mldsa")]
+            Signature::MLDsa44(_) => Ok(SSH_NAME_MLDSA44),
             Signature::Unknown(u) => Err(u),
         }
     }
@@ -484,6 +508,8 @@ impl<'a> Signature<'a> {
             PubKey::Ed25519(_) => Ok(SSH_NAME_ED25519),
             #[cfg(feature = "rsa")]
             PubKey::RSA(_) => Ok(SSH_NAME_RSA_SHA256),
+            #[cfg(feature = "mldsa")]
+            PubKey::MLDsa44(_) => Ok(SSH_NAME_MLDSA44),
             PubKey::Unknown(u) => {
                 warn!("Unknown key type \"{}\"", u);
                 Err(Error::UnknownMethod { kind: "key" })
@@ -496,6 +522,8 @@ impl<'a> Signature<'a> {
             Signature::Ed25519(_) => Ok(SigType::Ed25519),
             #[cfg(feature = "rsa")]
             Signature::RSA(_) => Ok(SigType::RSA),
+            #[cfg(feature = "mldsa")]
+            Signature::MLDsa44(_) => Ok(SigType::MLDsa44),
             Signature::Unknown(u) => {
                 warn!("Unknown signature type \"{}\"", u);
                 Err(Error::UnknownMethod { kind: "signature" })
@@ -514,6 +542,10 @@ impl<'a> From<&'a OwnedSig> for Signature<'a> {
             OwnedSig::RSA(s) => {
                 Signature::RSA(RSASig { sig: BinString(s.as_ref()) })
             }
+            #[cfg(feature = "mldsa")]
+            OwnedSig::MLDsa44(s) => {
+                Signature::MLDsa44(MLDsa44Sig { sig: BinString(s) })
+            }
         }
     }
 }
@@ -521,6 +553,12 @@ impl<'a> From<&'a OwnedSig> for Signature<'a> {
 #[derive(Debug, SSHEncode, SSHDecode, Clone)]
 #[cfg_attr(feature = "arbitrary", derive(Arbitrary))]
 pub struct Ed25519Sig<'a> {
+    pub sig: BinString<'a>,
+}
+
+#[cfg(feature = "mldsa")]
+#[derive(Debug, SSHEncode, SSHDecode, Clone)]
+pub struct MLDsa44Sig<'a> {
     pub sig: BinString<'a>,
 }
 

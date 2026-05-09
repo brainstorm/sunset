@@ -28,6 +28,8 @@ pub const SSH_NAME_STRICT_KEX_C: &str = "kex-strict-c-v00@openssh.com";
 
 /// [RFC8709](https://tools.ietf.org/html/rfc8709)
 pub const SSH_NAME_ED25519: &str = "ssh-ed25519";
+/// [FIPS204](https://csrc.nist.gov/pubs/fips/204/final) ML-DSA-44
+pub const SSH_NAME_MLDSA44: &str = "mldsa44";
 /// [RFC8332](https://tools.ietf.org/html/rfc8332)
 pub const SSH_NAME_RSA_SHA256: &str = "rsa-sha2-256";
 /// [RFC4253](https://tools.ietf.org/html/rfc4253). Deprecated for signatures but is a valid key type.

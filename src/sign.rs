@@ -14,6 +14,8 @@ use zeroize::ZeroizeOnDrop;
 
 use crate::*;
 use packets::{Ed25519PubKey, Ed25519Sig, PubKey, Signature};
+#[cfg(feature = "mldsa")]
+use packets::{MLDSA44_PUBKEY_SIZE, MLDSA44_SIG_SIZE};
 use sshnames::*;
 use sshwire::{Blob, SSHEncode};
 
@@ -26,6 +28,7 @@ use digest::Digest;
 // TODO remove once we use byupdate.
 // signatures are for hostkey (32 byte sessiid) or pubkey (auth packet || sessid).
 // we assume a max 40 character username here.
+// ML-DSA-44 signatures are 2420 bytes, much larger than other schemes.
 const MAX_SIG_MSG: usize = 1
     + 4
     + 40
@@ -38,7 +41,7 @@ const MAX_SIG_MSG: usize = 1
     + SSH_NAME_CURVE25519_LIBSSH.len()
     + 4
     + 32
-    + 32;
+    + 2500;
 
 // RSA requires alloc.
 #[cfg(feature = "rsa")]
@@ -51,7 +54,8 @@ pub enum SigType {
     Ed25519,
     #[cfg(feature = "rsa")]
     RSA,
-    // Ecdsa
+    #[cfg(feature = "mldsa")]
+    MLDsa44,
 }
 
 impl SigType {
@@ -61,6 +65,8 @@ impl SigType {
             SSH_NAME_ED25519 => Ok(SigType::Ed25519),
             #[cfg(feature = "rsa")]
             SSH_NAME_RSA_SHA256 => Ok(SigType::RSA),
+            #[cfg(feature = "mldsa")]
+            SSH_NAME_MLDSA44 => Ok(SigType::MLDsa44),
             _ => Err(Error::bug()),
         }
     }
@@ -71,6 +77,8 @@ impl SigType {
             SigType::Ed25519 => SSH_NAME_ED25519,
             #[cfg(feature = "rsa")]
             SigType::RSA => SSH_NAME_RSA_SHA256,
+            #[cfg(feature = "mldsa")]
+            SigType::MLDsa44 => SSH_NAME_MLDSA44,
         }
     }
 
@@ -80,6 +88,8 @@ impl SigType {
             Signature::Ed25519(e) => e.sig.0,
             #[cfg(feature = "rsa")]
             Signature::RSA(e) => e.sig.0,
+            #[cfg(feature = "mldsa")]
+            Signature::MLDsa44(e) => e.sig.0,
             Signature::Unknown(_) => panic!(),
         };
 
@@ -120,6 +130,11 @@ impl SigType {
             #[cfg(feature = "rsa")]
             (SigType::RSA, PubKey::RSA(k), Signature::RSA(s)) => {
                 Self::verify_rsa(k, msg, s)
+            }
+
+            #[cfg(feature = "mldsa")]
+            (SigType::MLDsa44, PubKey::MLDsa44(k), Signature::MLDsa44(s)) => {
+                Self::verify_mldsa44(k, msg, s)
             }
 
             _ => {
@@ -184,6 +199,31 @@ impl SigType {
             Error::BadSig
         })
     }
+
+    #[cfg(feature = "mldsa")]
+    fn verify_mldsa44(
+        k: &packets::MLDsa44PubKey,
+        msg: &dyn SSHEncode,
+        s: &packets::MLDsa44Sig,
+    ) -> Result<()> {
+        use ml_dsa::{EncodedVerifyingKey, MlDsa44, VerifyingKey};
+
+        let enc: EncodedVerifyingKey<MlDsa44> = k.key.0.into();
+        let vk = VerifyingKey::<MlDsa44>::decode(&enc);
+
+        let sig_bytes: &[u8; MLDSA44_SIG_SIZE] =
+            s.sig.0.try_into().map_err(|_| Error::BadSig)?;
+        let sig_enc: ml_dsa::EncodedSignature<MlDsa44> = (*sig_bytes).into();
+        let sig = ml_dsa::Signature::<MlDsa44>::decode(&sig_enc).ok_or(Error::BadSig)?;
+
+        let mut buf = [0; MAX_SIG_MSG];
+        let l = sshwire::write_ssh(&mut buf, msg)?;
+
+        if !vk.verify_with_context(&buf[..l], &[], &sig) {
+            return Err(Error::BadSig);
+        }
+        Ok(())
+    }
 }
 
 pub enum OwnedSig {
@@ -191,6 +231,8 @@ pub enum OwnedSig {
     Ed25519([u8; 64]),
     #[cfg(feature = "rsa")]
     RSA(Box<[u8]>),
+    #[cfg(feature = "mldsa")]
+    MLDsa44(Box<[u8]>),
 }
 
 #[cfg(feature = "rsa")]
@@ -213,6 +255,11 @@ impl TryFrom<Signature<'_>> for OwnedSig {
                 let s = s.sig.0.try_into().map_err(|_| Error::BadSig)?;
                 Ok(OwnedSig::RSA(s))
             }
+            #[cfg(feature = "mldsa")]
+            Signature::MLDsa44(s) => {
+                let s = s.sig.0.to_vec().into_boxed_slice();
+                Ok(OwnedSig::MLDsa44(s))
+            }
             Signature::Unknown(u) => {
                 debug!("Unknown {u} signature");
                 Err(Error::UnknownMethod { kind: "signature" })
@@ -226,6 +273,8 @@ pub enum KeyType {
     Ed25519,
     #[cfg(feature = "rsa")]
     RSA,
+    #[cfg(feature = "mldsa")]
+    MLDsa44,
 }
 
 /// A SSH signing key.
@@ -250,6 +299,32 @@ pub enum SignKey {
     #[cfg(feature = "rsa")]
     #[zeroize(skip)]
     AgentRSA(rsa::RsaPublicKey),
+
+    #[cfg(feature = "mldsa")]
+    #[zeroize(skip)]
+    MLDsa44(Mldsa44Seed),
+
+    #[cfg(feature = "mldsa")]
+    #[zeroize(skip)]
+    AgentMLDsa44(Vec<u8>),
+}
+
+#[cfg(feature = "mldsa")]
+#[derive(Clone, PartialEq, Eq)]
+pub struct Mldsa44Seed([u8; 32]);
+
+#[cfg(feature = "mldsa")]
+impl zeroize::Zeroize for Mldsa44Seed {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+#[cfg(feature = "mldsa")]
+impl core::fmt::Debug for Mldsa44Seed {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Mldsa44Seed").finish_non_exhaustive()
+    }
 }
 
 impl SignKey {
@@ -281,6 +356,13 @@ impl SignKey {
                     })?;
                 Ok(Self::RSA(k))
             }
+
+            #[cfg(feature = "mldsa")]
+            KeyType::MLDsa44 => {
+                let mut seed = [0u8; 32];
+                crate::random::fill_random(&mut seed)?;
+                Ok(Self::MLDsa44(Mldsa44Seed(seed)))
+            }
         }
     }
 
@@ -300,6 +382,27 @@ impl SignKey {
 
             #[cfg(feature = "rsa")]
             SignKey::AgentRSA(pk) => PubKey::RSA(RSAPubKey { key: pk.clone() }),
+
+            #[cfg(feature = "mldsa")]
+            SignKey::MLDsa44(seed) => {
+                use ml_dsa::{KeyGen, MlDsa44};
+                let sk = MlDsa44::from_seed(&ml_dsa::Seed::from(seed.0));
+                let esk = sk.signing_key();
+                let vk = esk.verifying_key();
+                let mut key_bytes = [0u8; MLDSA44_PUBKEY_SIZE];
+                key_bytes.copy_from_slice(vk.encode().as_ref());
+                PubKey::MLDsa44(packets::MLDsa44PubKey { key: Blob(key_bytes) })
+            }
+
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMLDsa44(vk_bytes) => {
+                let key_bytes: [u8; MLDSA44_PUBKEY_SIZE] =
+                    vk_bytes.as_slice().try_into().unwrap_or_else(|_| {
+                        // This should never fail since vk_bytes was created from a valid pubkey
+                        panic!("AgentMLDsa44: invalid key length")
+                    });
+                PubKey::MLDsa44(packets::MLDsa44PubKey { key: Blob(key_bytes) })
+            }
         }
     }
 
@@ -322,6 +425,12 @@ impl SignKey {
             #[cfg(feature = "rsa")]
             PubKey::RSA(k) => Ok(Self::AgentRSA(k.key.clone())),
 
+            #[cfg(feature = "mldsa")]
+            PubKey::MLDsa44(k) => {
+                let vk_bytes = k.key.0.to_vec();
+                Ok(Self::AgentMLDsa44(vk_bytes))
+            }
+
             PubKey::Unknown(_) => Err(Error::msg("Unsupported agent key")),
         }
     }
@@ -336,6 +445,11 @@ impl SignKey {
             #[cfg(feature = "rsa")]
             SignKey::RSA(_) | SignKey::AgentRSA(_) => {
                 matches!(sig_type, SigType::RSA)
+            }
+
+            #[cfg(feature = "mldsa")]
+            SignKey::MLDsa44(_) | SignKey::AgentMLDsa44(_) => {
+                matches!(sig_type, SigType::MLDsa44)
             }
         }
     }
@@ -375,10 +489,28 @@ impl SignKey {
                 OwnedSig::RSA(sig.into())
             }
 
+            #[cfg(feature = "mldsa")]
+            SignKey::MLDsa44(seed) => {
+                use ml_dsa::{KeyGen, MlDsa44};
+                let sk = MlDsa44::from_seed(&ml_dsa::Seed::from(seed.0));
+                let esk = sk.signing_key();
+
+                let mut buf = [0; MAX_SIG_MSG];
+                let l = sshwire::write_ssh(&mut buf, msg)?;
+                let buf = &buf[..l];
+
+                let sig = esk.sign_deterministic(buf, &[])
+                    .map_err(|_| Error::bug())?;
+                let sig_bytes = sig.encode();
+                OwnedSig::MLDsa44(sig_bytes.to_vec().into_boxed_slice())
+            }
+
             // callers should check for agent keys first
             SignKey::AgentEd25519(_) => return Error::bug_msg("agent sign"),
             #[cfg(feature = "rsa")]
             SignKey::AgentRSA(_) => return Error::bug_msg("agent sign"),
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMLDsa44(_) => return Error::bug_msg("agent sign"),
         };
 
         // {
@@ -398,10 +530,14 @@ impl SignKey {
             SignKey::Ed25519(_) => false,
             #[cfg(feature = "rsa")]
             SignKey::RSA(_) => false,
+            #[cfg(feature = "mldsa")]
+            SignKey::MLDsa44(_) => false,
 
             SignKey::AgentEd25519(_) => true,
             #[cfg(feature = "rsa")]
             SignKey::AgentRSA(_) => true,
+            #[cfg(feature = "mldsa")]
+            SignKey::AgentMLDsa44(_) => true,
         }
     }
 }
@@ -415,6 +551,10 @@ impl core::fmt::Debug for SignKey {
             Self::RSA(_) => "RSA",
             #[cfg(feature = "rsa")]
             Self::AgentRSA(_) => "AgentRSA",
+            #[cfg(feature = "mldsa")]
+            Self::MLDsa44(_) => "MLDsa44",
+            #[cfg(feature = "mldsa")]
+            Self::AgentMLDsa44(_) => "AgentMLDsa44",
         };
         write!(f, "SignKey::{s}")
     }
@@ -454,5 +594,122 @@ impl TryFrom<ssh_key::PrivateKey> for SignKey {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    // TODO: tests for sign()/verify() and invalid signatures
+    use super::*;
+
+    #[test]
+    fn test_ed25519_sign_verify() {
+        let key = SignKey::generate(KeyType::Ed25519, None).unwrap();
+        let msg = b"hello world";
+
+        let sig = key.sign(&msg).unwrap();
+
+        let pubkey = key.pubkey();
+        let owned_sig: Signature = (&sig).into();
+        let sig_type = owned_sig.sig_type().unwrap();
+        sig_type.verify(&pubkey, &msg, &owned_sig).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_sign_verify() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        let msg = b"hello world";
+
+        let sig = key.sign(&msg).unwrap();
+
+        let pubkey = key.pubkey();
+        let owned_sig: Signature = (&sig).into();
+        let sig_type = owned_sig.sig_type().unwrap();
+        assert_eq!(sig_type.algorithm_name(), SSH_NAME_MLDSA44);
+        sig_type.verify(&pubkey, &msg, &owned_sig).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_keytype() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        assert!(key.can_sign(SigType::MLDsa44));
+        assert!(!key.can_sign(SigType::Ed25519));
+        assert!(!key.is_agent());
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_bad_signature() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        let msg = b"hello world";
+        let wrong_msg = b"wrong message";
+
+        let sig = key.sign(&msg).unwrap();
+        let pubkey = key.pubkey();
+        let owned_sig: Signature = (&sig).into();
+        let sig_type = owned_sig.sig_type().unwrap();
+
+        let result = sig_type.verify(&pubkey, &wrong_msg, &owned_sig);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_pubkey_roundtrip() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        let pubkey = key.pubkey();
+
+        // Verify pubkey type is correct
+        assert!(matches!(pubkey, crate::packets::PubKey::MLDsa44(_)));
+
+        // Verify algorithm name
+        assert_eq!(pubkey.algorithm_name().unwrap(), SSH_NAME_MLDSA44);
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_agent_key() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        let pubkey = key.pubkey();
+
+        let agent_key = SignKey::from_agent_pubkey(&pubkey).unwrap();
+        assert!(agent_key.is_agent());
+        assert!(agent_key.can_sign(SigType::MLDsa44));
+        assert!(!agent_key.can_sign(SigType::Ed25519));
+
+        let agent_pubkey = agent_key.pubkey();
+        assert!(matches!(agent_pubkey, crate::packets::PubKey::MLDsa44(_)));
+    }
+
+    #[test]
+    fn test_sigtype_from_name() {
+        assert!(matches!(SigType::from_name(SSH_NAME_ED25519).unwrap(), SigType::Ed25519));
+        #[cfg(feature = "mldsa")]
+        assert!(matches!(SigType::from_name(SSH_NAME_MLDSA44).unwrap(), SigType::MLDsa44));
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_unknown_sig() {
+        SigType::from_name("bad").unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "mldsa")]
+    fn test_mldsa44_signature_roundtrip() {
+        let key = SignKey::generate(KeyType::MLDsa44, None).unwrap();
+        let msg = b"test message for roundtrip";
+
+        let sig = key.sign(&msg).unwrap();
+
+        // Convert OwnedSig to Signature
+        let sig_ref: Signature = (&sig).into();
+        let sig_type = sig_ref.sig_type().unwrap();
+        assert_eq!(sig_type.algorithm_name(), SSH_NAME_MLDSA44);
+
+        // Verify with the same key
+        let pubkey = key.pubkey();
+        sig_type.verify(&pubkey, &msg, &sig_ref).unwrap();
+
+        // Also verify with a different reference to the same signature
+        let owned_sig2: OwnedSig = sig_ref.try_into().unwrap();
+        let sig_ref2: Signature = (&owned_sig2).into();
+        sig_type.verify(&pubkey, &msg, &sig_ref2).unwrap();
+    }
 }
