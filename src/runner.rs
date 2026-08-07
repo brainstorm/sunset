@@ -453,6 +453,41 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         self.closed_input = true;
     }
 
+    /// Send `SSH_MSG_DISCONNECT`, telling the peer why the connection is ending
+    ///
+    /// `desc` is a human-readable description which clients may show to the
+    /// user; OpenSSH prints it for a disconnect received before authentication
+    /// completes, which is otherwise a point where a server has no way to
+    /// explain itself. `reason` is the machine-readable
+    /// [`DisconnectReason`] accompanying it.
+    ///
+    /// The packet is queued like any other, so the caller must keep running
+    /// the output side until it has been written to the wire — dropping the
+    /// connection immediately will discard it. After this the peer is
+    /// entitled to close the connection at once, so no further packets should
+    /// be sent ([RFC4253](https://tools.ietf.org/html/rfc4253#section-11.1)).
+    ///
+    /// This does not itself close the connection; the caller does that once
+    /// the output has drained.
+    pub fn disconnect(
+        &mut self,
+        reason: DisconnectReason,
+        desc: &str,
+    ) -> Result<()> {
+        debug!("disconnect {reason:?}: {desc}");
+        let p = packets::Disconnect {
+            reason: reason as u32,
+            desc: desc.into(),
+            // Empty, per RFC4253: the tag is only meaningful if the
+            // description is actually localised, which it is not here.
+            lang: "",
+        };
+        let mut s = self.traf_out.sender(&mut self.keys);
+        s.send(p)?;
+        self.wake();
+        Ok(())
+    }
+
     /// Write any pending output to the wire, returning the size written
     pub fn output(&mut self, buf: &mut [u8]) -> usize {
         let out = self.output_buf();

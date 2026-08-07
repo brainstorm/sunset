@@ -1171,6 +1171,63 @@ mod tests {
     use crate::sunsetlog::init_test_log;
 
     #[test]
+    /// Disconnect encodes the reason code and description the peer will read
+    fn roundtrip_disconnect() {
+        init_test_log();
+        let p = packets::Disconnect {
+            reason: DisconnectReason::SSH_DISCONNECT_ILLEGAL_USER_NAME as u32,
+            desc: "no such user".into(),
+            lang: "",
+        };
+        test_roundtrip(&Packet::Disconnect(p));
+    }
+
+    #[test]
+    /// The wire format is fixed by RFC4253, so pin the bytes rather than
+    /// only round-tripping through our own encoder.
+    fn disconnect_wire_format() {
+        init_test_log();
+        let p = Packet::Disconnect(packets::Disconnect {
+            reason: DisconnectReason::SSH_DISCONNECT_BY_APPLICATION as u32,
+            desc: "bye".into(),
+            lang: "",
+        });
+        let mut buf = vec![0u8; 64];
+        let l = write_ssh(&mut buf, &p).unwrap();
+        assert_eq!(
+            &buf[..l],
+            &[
+                1, // SSH_MSG_DISCONNECT
+                0, 0, 0, 11, // SSH_DISCONNECT_BY_APPLICATION
+                0, 0, 0, 3, b'b', b'y', b'e', // description
+                0, 0, 0, 0, // empty language tag
+            ]
+        );
+    }
+
+    #[test]
+    /// Reason codes must match RFC4253 s11.1 exactly; a wrong number is a
+    /// silently wrong message to the peer.
+    fn disconnect_reason_codes() {
+        use DisconnectReason::*;
+        assert_eq!(SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT as u32, 1);
+        assert_eq!(SSH_DISCONNECT_PROTOCOL_ERROR as u32, 2);
+        assert_eq!(SSH_DISCONNECT_KEY_EXCHANGE_FAILED as u32, 3);
+        assert_eq!(SSH_DISCONNECT_RESERVED as u32, 4);
+        assert_eq!(SSH_DISCONNECT_MAC_ERROR as u32, 5);
+        assert_eq!(SSH_DISCONNECT_COMPRESSION_ERROR as u32, 6);
+        assert_eq!(SSH_DISCONNECT_SERVICE_NOT_AVAILABLE as u32, 7);
+        assert_eq!(SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED as u32, 8);
+        assert_eq!(SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE as u32, 9);
+        assert_eq!(SSH_DISCONNECT_CONNECTION_LOST as u32, 10);
+        assert_eq!(SSH_DISCONNECT_BY_APPLICATION as u32, 11);
+        assert_eq!(SSH_DISCONNECT_TOO_MANY_CONNECTIONS as u32, 12);
+        assert_eq!(SSH_DISCONNECT_AUTH_CANCELLED_BY_USER as u32, 13);
+        assert_eq!(SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE as u32, 14);
+        assert_eq!(SSH_DISCONNECT_ILLEGAL_USER_NAME as u32, 15);
+    }
+
+    #[test]
     /// check round trip of packet enums is right
     fn packet_type() {
         for i in 0..=255 {

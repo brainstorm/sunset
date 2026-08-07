@@ -1,5 +1,18 @@
 # Sunset Changelog
 
+## Unreleased
+
+### Added
+
+- `Runner::disconnect()` and `SSHServer::disconnect()` send
+  `SSH_MSG_DISCONNECT` with a reason code and a description. Previously
+  the packet could only be received, and its reason was ignored, so a
+  server had no way to tell a client why a connection was ending —
+  particularly before authentication completes, where there is no
+  channel to write to and clients do display the description.
+
+- `DisconnectReason`, the reason codes from RFC4253 s11.1.
+
 ## 0.6.0 - 2026-08-02
 
 ### Changed
