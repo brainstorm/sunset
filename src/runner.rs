@@ -191,6 +191,20 @@ impl<'a> Runner<'a, server::Server> {
         Self::new(inbuf, outbuf)
     }
 
+    /// Send `SSH_MSG_USERAUTH_BANNER`, a message shown before authentication
+    ///
+    /// Only meaningful before authentication succeeds
+    /// ([RFC4252](https://tools.ietf.org/html/rfc4252#section-5.4)). Clients
+    /// print `msg` verbatim, so it should normally end with CRLF.
+    pub fn auth_banner(&mut self, msg: &str) -> Result<()> {
+        debug!("auth_banner: {msg}");
+        let p = packets::UserauthBanner { message: msg.into(), lang: "".into() };
+        let mut s = self.traf_out.sender(&mut self.keys);
+        s.send(p)?;
+        self.wake();
+        Ok(())
+    }
+
     pub(crate) fn resume_servhostkeys(&mut self, keys: &[&SignKey]) -> Result<()> {
         let (payload, _seq) = self.traf_in.payload().trap()?;
         let mut s = self.traf_out.sender(&mut self.keys);
