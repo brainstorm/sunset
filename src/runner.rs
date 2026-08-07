@@ -191,6 +191,31 @@ impl<'a> Runner<'a, server::Server> {
         Self::new(inbuf, outbuf)
     }
 
+    /// Send `SSH_MSG_USERAUTH_BANNER`, a message shown before authentication
+    ///
+    /// [RFC4252](https://tools.ietf.org/html/rfc4252#section-5.4) allows this
+    /// at any point before authentication succeeds. Clients typically print it
+    /// to the user's terminal, which makes it the only way a server can
+    /// explain itself while there is no channel to write to — for instance to
+    /// say why a login is likely to fail, or how to provision a key.
+    ///
+    /// `msg` should normally end with CRLF, since clients display it verbatim.
+    ///
+    /// Sending after authentication has succeeded is not useful; clients are
+    /// entitled to ignore it.
+    pub fn auth_banner(&mut self, msg: &str) -> Result<()> {
+        debug!("auth_banner: {msg}");
+        let p = packets::UserauthBanner {
+            message: msg.into(),
+            // Empty: only meaningful for genuinely localised text.
+            lang: "".into(),
+        };
+        let mut s = self.traf_out.sender(&mut self.keys);
+        s.send(p)?;
+        self.wake();
+        Ok(())
+    }
+
     pub(crate) fn resume_servhostkeys(&mut self, keys: &[&SignKey]) -> Result<()> {
         let (payload, _seq) = self.traf_in.payload().trap()?;
         let mut s = self.traf_out.sender(&mut self.keys);

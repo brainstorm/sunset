@@ -1228,6 +1228,27 @@ mod tests {
     }
 
     #[test]
+    /// Banner encodes the text a client will print pre-auth
+    fn banner_wire_format() {
+        init_test_log();
+        let p = Packet::UserauthBanner(packets::UserauthBanner {
+            message: "hi\r\n".into(),
+            lang: "".into(),
+        });
+        let mut buf = vec![0u8; 64];
+        let l = write_ssh(&mut buf, &p).unwrap();
+        assert_eq!(
+            &buf[..l],
+            &[
+                53, // SSH_MSG_USERAUTH_BANNER
+                0, 0, 0, 4, b'h', b'i', b'\r', b'\n', // message
+                0, 0, 0, 0, // empty language tag
+            ]
+        );
+        test_roundtrip(&p);
+    }
+
+    #[test]
     /// check round trip of packet enums is right
     fn packet_type() {
         for i in 0..=255 {

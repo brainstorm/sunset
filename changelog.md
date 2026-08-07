@@ -13,6 +13,11 @@
 
 - `DisconnectReason`, the reason codes from RFC4253 s11.1.
 
+- `Runner::auth_banner()` and `SSHServer::auth_banner()` send
+  `SSH_MSG_USERAUTH_BANNER` (RFC4252 s5.4). Servers could previously
+  only receive banners. Clients print these before authentication, so
+  this is how a server explains itself when there is no channel yet.
+
 ## 0.6.0 - 2026-08-02
 
 ### Changed

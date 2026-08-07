@@ -55,6 +55,17 @@ impl<'a> SSHServer<'a> {
         self.sunset.with_runner(|r| r.disconnect(reason, desc)).await
     }
 
+    /// Send `SSH_MSG_USERAUTH_BANNER`, a message shown before authentication.
+    ///
+    /// See [`Runner::auth_banner()`]. Must be sent before authentication
+    /// succeeds to be useful, so in practice from the `FirstAuth` event.
+    ///
+    /// Do not call while holding a [`ProgressHolder`], which keeps the session
+    /// mutex — this would deadlock.
+    pub async fn auth_banner(&self, msg: &str) -> Result<()> {
+        self.sunset.with_runner(|r| r.auth_banner(msg)).await
+    }
+
     /// Returns an event from the SSH session.
     ///
     /// Note that on return `ProgressHolder` holds a mutex over the session,
