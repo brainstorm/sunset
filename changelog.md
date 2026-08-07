@@ -1,5 +1,12 @@
 # Sunset Changelog
 
+## Unreleased
+
+### Added
+
+- `Runner::disconnect()` and `SSHServer::disconnect()` send
+  `SSH_MSG_DISCONNECT`, with `DisconnectReason` codes from RFC4253 s11.1.
+
 ## 0.6.0 - 2026-08-02
 
 ### Changed

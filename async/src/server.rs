@@ -38,6 +38,17 @@ impl<'a> SSHServer<'a> {
         self.sunset.run(rsock, wsock).await
     }
 
+    /// Send `SSH_MSG_DISCONNECT`. See [`Runner::disconnect()`].
+    ///
+    /// Must not be called while holding a [`ProgressHolder`] (deadlock).
+    pub async fn disconnect(
+        &self,
+        reason: DisconnectReason,
+        desc: &str,
+    ) -> Result<()> {
+        self.sunset.with_runner(|r| r.disconnect(reason, desc)).await
+    }
+
     /// Returns an event from the SSH session.
     ///
     /// Note that on return `ProgressHolder` holds a mutex over the session,

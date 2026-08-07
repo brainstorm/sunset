@@ -453,6 +453,28 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         self.closed_input = true;
     }
 
+    /// Send `SSH_MSG_DISCONNECT`, telling the peer why the connection is ending
+    ///
+    /// `desc` is human-readable and may be shown to the user. The packet is
+    /// only queued: the caller must keep running until output has drained,
+    /// then close the connection.
+    pub fn disconnect(
+        &mut self,
+        reason: DisconnectReason,
+        desc: &str,
+    ) -> Result<()> {
+        debug!("disconnect {reason:?}: {desc}");
+        let p = packets::Disconnect {
+            reason: reason as u32,
+            desc: desc.into(),
+            lang: "",
+        };
+        let mut s = self.traf_out.sender(&mut self.keys);
+        s.send(p)?;
+        self.wake();
+        Ok(())
+    }
+
     /// Write any pending output to the wire, returning the size written
     pub fn output(&mut self, buf: &mut [u8]) -> usize {
         let out = self.output_buf();
