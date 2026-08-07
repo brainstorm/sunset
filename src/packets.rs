@@ -1228,6 +1228,25 @@ mod tests {
     }
 
     #[test]
+    /// A received reason maps back to the enum, and an unregistered code is
+    /// reported rather than rejected.
+    fn disconnect_reason_from_wire() {
+        init_test_log();
+        for r in [
+            DisconnectReason::SSH_DISCONNECT_BY_APPLICATION,
+            DisconnectReason::SSH_DISCONNECT_ILLEGAL_USER_NAME,
+            DisconnectReason::SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT,
+        ] {
+            assert_eq!(DisconnectReason::from_code(r as u32), Some(r));
+        }
+        // 0 is not assigned, and the registry can grow past 15. Neither is
+        // a protocol error, so these must decode to None, not fail.
+        assert_eq!(DisconnectReason::from_code(0), None);
+        assert_eq!(DisconnectReason::from_code(16), None);
+        assert_eq!(DisconnectReason::from_code(u32::MAX), None);
+    }
+
+    #[test]
     /// Banner encodes the text a client will print pre-auth
     fn banner_wire_format() {
         init_test_log();

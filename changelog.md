@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- `CliEvent` and `ServEvent` have a new `Disconnected` variant, so
+  exhaustive matches on them need updating.
+
 ### Added
 
 - `Runner::disconnect()` and `SSHServer::disconnect()` send
@@ -12,6 +17,13 @@
   channel to write to and clients do display the description.
 
 - `DisconnectReason`, the reason codes from RFC4253 s11.1.
+
+- A received `SSH_MSG_DISCONNECT` is now reported as a
+  `CliEvent::Disconnected` / `ServEvent::Disconnected` event carrying the
+  peer's reason code and description. Previously the reason was discarded
+  and the connection just ended, indistinguishable from a dropped link.
+  `DisconnectReason::from_code()` maps a wire code to the enum, returning
+  `None` for codes outside RFC4253 rather than treating them as errors.
 
 - `Runner::auth_banner()` and `SSHServer::auth_banner()` send
   `SSH_MSG_USERAUTH_BANNER` (RFC4252 s5.4). Servers could previously

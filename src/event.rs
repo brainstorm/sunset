@@ -47,6 +47,8 @@ pub enum CliEvent<'g, 'a> {
     SessionOpened(CliSessionOpener<'g, 'a>),
     /// Remote process exited
     SessionExit(CliSessionExit<'g>),
+    /// The peer sent a disconnect message, ending the connection.
+    Disconnected(Disconnected<'g>),
 
     // ChanRequest(ChanRequest<'g, 'a>),
     // Banner { banner: TextString<'a>, language: TextString<'a> },
@@ -73,6 +75,7 @@ impl Debug for CliEvent<'_, '_> {
             Self::SessionExit(_) => "SessionExit",
             Self::AgentSign(_) => "AgentSign",
             Self::Banner(_) => "Banner",
+            Self::Disconnected(_) => "Disconnected",
             Self::Defunct => "Defunct",
             Self::PollAgain => "PollAgain",
         };
@@ -163,6 +166,41 @@ impl CheckHostkey<'_, '_> {
     }
 }
 
+/// The peer sent `SSH_MSG_DISCONNECT`.
+///
+/// The connection is over: [RFC4253](https://tools.ietf.org/html/rfc4253#section-11.1)
+/// requires the sender to stop sending and close it afterwards. This event
+/// reports why, which is otherwise indistinguishable from the connection
+/// simply dropping.
+pub struct Disconnected<'a>(pub(crate) packets::Disconnect<'a>);
+
+impl Disconnected<'_> {
+    /// The reason code, if it is one defined by RFC4253.
+    ///
+    /// `None` for a code outside the registry, which is not an error — a
+    /// peer may send any value, and [`desc()`](Self::desc) still applies.
+    pub fn reason(&self) -> Option<DisconnectReason> {
+        DisconnectReason::from_code(self.0.reason)
+    }
+
+    /// The raw reason code, whether or not it is recognised.
+    pub fn reason_code(&self) -> u32 {
+        self.0.reason
+    }
+
+    /// The peer's human-readable description.
+    ///
+    /// Remote-supplied text: treat it as untrusted, and take care when
+    /// displaying it on a terminal.
+    pub fn desc(&self) -> Result<&str> {
+        self.0.desc.to_str()
+    }
+
+    pub fn raw_desc(&self) -> TextString<'_> {
+        self.0.desc
+    }
+}
+
 pub struct Banner<'a>(pub(crate) packets::UserauthBanner<'a>);
 
 impl Banner<'_> {
@@ -188,10 +226,10 @@ pub(crate) enum CliEventId {
     SessionOpened(ChanNum),
     SessionExit,
     Banner,
+    Disconnected,
     #[expect(unused)]
     Defunct,
     // TODO:
-    // Disconnected
     // OpenTCPForwarded (new session)
     // TCPDirectOpened (response)
 }
@@ -223,6 +261,9 @@ impl CliEventId {
                 Ok(CliEvent::SessionExit(runner.fetch_cli_session_exit()?))
             }
             Self::Banner => Ok(CliEvent::Banner(runner.fetch_cli_banner()?)),
+            Self::Disconnected => {
+                Ok(CliEvent::Disconnected(runner.fetch_disconnect()?))
+            }
             Self::Defunct => error::BadUsage.fail(),
         }
     }
@@ -238,6 +279,7 @@ impl CliEventId {
             | Self::SessionOpened(_)
             | Self::SessionExit
             | Self::Banner
+            | Self::Disconnected
             | Self::Defunct => false,
             Self::Hostkey
             | Self::Username
@@ -301,6 +343,9 @@ pub enum ServEvent<'g, 'a> {
     /// Note: input strings are not sanitised.
     SessionEnv(ServEnvironmentRequest<'g, 'a>),
 
+    /// The peer sent a disconnect message, ending the connection.
+    Disconnected(Disconnected<'g>),
+
     /// The SSH session is no longer running
     Defunct,
 
@@ -326,6 +371,7 @@ impl Debug for ServEvent<'_, '_> {
             Self::SessionSubsystem(_) => "SessionSubsystem",
             Self::SessionPty(_) => "SessionPty",
             Self::SessionEnv(_) => "Environment",
+            Self::Disconnected(_) => "Disconnected",
             Self::Defunct => "Defunct",
             Self::PollAgain => "PollAgain",
         };
@@ -945,13 +991,12 @@ pub(crate) enum ServEventId {
     Environment {
         num: ChanNum,
     },
+    Disconnected,
     #[expect(unused)]
     Defunct,
     // TODO:
-    // Disconnected
     // OpenTCPForwarded (new session)
     // TCPDirectOpened (response)
-    // Banner
 }
 
 impl ServEventId {
@@ -1006,6 +1051,10 @@ impl ServEventId {
                 debug_assert!(matches!(p, Some(Packet::ChannelRequest(_))));
                 Ok(ServEvent::SessionEnv(ServEnvironmentRequest::new(runner, num)))
             }
+            Self::Disconnected => {
+                debug_assert!(matches!(p, Some(Packet::Disconnect(_))));
+                Ok(ServEvent::Disconnected(runner.fetch_disconnect()?))
+            }
             Self::Defunct => Ok(ServEvent::Defunct),
         }
     }
@@ -1014,7 +1063,8 @@ impl ServEventId {
     // Used for internal correctness checks.
     pub(crate) fn needs_resume(&self) -> bool {
         match self {
-            Self::Defunct | Self::Authenticated => false,
+            // Disconnected is informational; the connection is already over.
+            Self::Defunct | Self::Authenticated | Self::Disconnected => false,
             Self::Hostkeys
             | Self::FirstAuth
             | Self::PasswordAuth
