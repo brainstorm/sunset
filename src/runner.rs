@@ -461,6 +461,12 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         set_waker(&mut self.input_waker, waker)
     }
 
+    /// The `Disconnect` packet currently being handled.
+    pub(crate) fn fetch_disconnect(&mut self) -> Result<event::Disconnected<'_>> {
+        let (payload, _seq) = self.traf_in.payload().trap()?;
+        self.conn.fetch_disconnect(payload)
+    }
+
     /// Indicate that the input SSH tcp socket has closed
     pub fn close_input(&mut self) {
         trace!("close_input");

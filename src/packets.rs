@@ -1193,6 +1193,16 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_reason_from_code() {
+        for c in 1..=15 {
+            assert_eq!(DisconnectReason::from_code(c).map(|r| r as u32), Some(c));
+        }
+        // Unknown codes are not a protocol error.
+        assert_eq!(DisconnectReason::from_code(0), None);
+        assert_eq!(DisconnectReason::from_code(16), None);
+    }
+
+    #[test]
     fn banner_wire_format() {
         init_test_log();
         let p = Packet::UserauthBanner(packets::UserauthBanner {
